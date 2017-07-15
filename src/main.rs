@@ -2,8 +2,10 @@ mod parser;
 
 use std::net::TcpListener;
 use std::thread;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::io;
+use std::fs::File;
+use std::path::PathBuf;
 
 fn server_start() -> io::Result<()> {
     // 127.0.0.1:8080をlistenし、acceptしつづけるリスナーを作成
@@ -53,20 +55,33 @@ fn server_start() -> io::Result<()> {
                         // スレッドから抜けると`stream`のライフタイムが終わるため、コネクションが自動で閉じられる
                         Error => {
                             return Ok(());
-                        },
+                        }
                         // リクエストが届けば処理をする
                         Complete(req) => {
                             // レスポンスを返す処理をここに書く
-                            // 本来はファイルの中身を返すがここでは適当な文字列を返す
-                            // `write`マクロを使うことでフォーマッティングしつつ書き込める。
-                            write!(stream, "OK {}\r\n", req.0)?;
 
+                            // 相対ディレクトリでアクセスするために
+                            // リクエストのパスの先頭の`/`を取り除く
+                            let mut path = req.0;
+                            while path.starts_with("/") {
+                                path = &path[1..];
+                            }
+
+                            // 相対パスにする
+                            let path = PathBuf::new().join("./").join(path);
+                            assert!(path.is_relative());
+                            // ファイルを開く。HTTP/0.9はエラーがないので
+                            // 純粋なIOエラーとFileが見付からないエラーを区別しない
+                            let mut file = File::open(path)?;
+                            // io::copyでinputからoutputへコピーできる
+                            io::copy(&mut file, &mut stream)?;
                             // 処理が完了したらスレッドから抜ける
                             return Ok(());
-                        },
+                        }
                     };
                 }
-            });
+            },
+        );
     }
     Ok(())
 }
