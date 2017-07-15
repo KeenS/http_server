@@ -67,14 +67,21 @@ fn server_start() -> io::Result<()> {
                                 path = &path[1..];
                             }
 
-                            // 相対パスにする
-                            let path = PathBuf::new().join("./").join(path);
-                            assert!(path.is_relative());
+                            let path = PathBuf::new().join(path).canonicalize()?;
+                            // 正準な絶対パス同士の比較でベースディレクトリから始まらない
+                            // パスにアクセスしようとしていれば ディレクトリトラバーサルなので
+                            // Bad Requestとする
+                            let base_dir = PathBuf::new().join("./").canonicalize()?;
+                            if !path.starts_with(&base_dir) {
+                                return Ok(());
+                            }
+
                             // ファイルを開く。HTTP/0.9はエラーがないので
                             // 純粋なIOエラーとFileが見付からないエラーを区別しない
                             let mut file = File::open(path)?;
                             // io::copyでinputからoutputへコピーできる
                             io::copy(&mut file, &mut stream)?;
+
                             // 処理が完了したらスレッドから抜ける
                             return Ok(());
                         }
