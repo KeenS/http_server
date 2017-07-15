@@ -2,7 +2,7 @@ mod parser;
 
 use std::net::TcpListener;
 use std::thread;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::io;
 use std::fs::File;
 use std::path::PathBuf;
@@ -47,41 +47,60 @@ fn server_start() -> io::Result<()> {
                     }
                     // リクエスト全体のバッファに今読み込んだ分を追記
                     buf.extend_from_slice(&b[0..n]);
-                    // それ以外ではHTTP/0.9のリクエストの処理
+                    // それ以外ではHTTP/1.0のリクエストの処理
+                    // レスポンスのフォーマットは以下を参照
+                    // https://tools.ietf.org/html/rfc1945#section-6
+                    // 課題はヘッダのパースのみなのでレスポンスは雑に返す。
                     match parser::parse(buf.as_slice()) {
                         // 入力の途中なら新たな入力を待つため次のイテレーションへ
                         Partial => continue,
-                        // エラーなら不正な入力なので何も返さずスレッドから抜ける
+                        // エラーなら不正な入力なのでBad Requestを返す
                         // スレッドから抜けると`stream`のライフタイムが終わるため、コネクションが自動で閉じられる
-                        Error => {
-                            return Ok(());
-                        }
+                        Error => write!(stream, "HTTP/1.0 400 Bad Request\r\n\r\n")?,
                         // リクエストが届けば処理をする
                         Complete(req) => {
-                            // レスポンスを返す処理をここに書く
-
                             // 相対ディレクトリでアクセスするために
                             // リクエストのパスの先頭の`/`を取り除く
-                            let mut path = req.0;
+                            let mut path = req.path;
                             while path.starts_with("/") {
                                 path = &path[1..];
                             }
 
+                            // 絶対パスにする
                             let path = PathBuf::new().join(path).canonicalize()?;
-                            // 正準な絶対パス同士の比較でベースディレクトリから始まらない
-                            // パスにアクセスしようとしていれば ディレクトリトラバーサルなので
+                            // 正準な絶対パス同士の比較でベースディレクトリから始まらないパスに
+                            // アクセスしようとしていればディレクトリトラバーサルなので
                             // Bad Requestとする
                             let base_dir = PathBuf::new().join("./").canonicalize()?;
                             if !path.starts_with(&base_dir) {
+                                write!(stream, "HTTP/1.0 400 Bad Request\r\n\r\n")?;
                                 return Ok(());
                             }
-
-                            // ファイルを開く。HTTP/0.9はエラーがないので
-                            // 純粋なIOエラーとFileが見付からないエラーを区別しない
-                            let mut file = File::open(path)?;
-                            // io::copyでinputからoutputへコピーできる
-                            io::copy(&mut file, &mut stream)?;
-
+                            // ファイルを開く。HTTP/1.0はエラーがあるので
+                            // エラーハンドリングをする。
+                            match File::open(path) {
+                                Ok(mut file) => {
+                                    write!(stream, "HTTP/1.0 200 Ok\r\n\r\n")?;
+                                    // io::copyでinputからoutputへコピーできる
+                                    io::copy(&mut file, &mut stream)?;
+                                }
+                                Err(ioerror) => {
+                                    use io::ErrorKind::*;
+                                    match ioerror.kind() {
+                                        // ファイルがなければNot Found
+                                        NotFound => {
+                                            write!(stream, "HTTP/1.0 404 Not Found\r\n\r\n")?
+                                        }
+                                        // それ以外はInternal Server Error
+                                        _ => {
+                                            write!(
+                                                stream,
+                                                "HTTP/1.0 500 Internal Server Error\r\n\r\n"
+                                            )?
+                                        }
+                                    }
+                                }
+                            }
                             // 処理が完了したらスレッドから抜ける
                             return Ok(());
                         }

@@ -12,8 +12,12 @@ ae6d3f7b2e4ec0f868a4a205323c1f3fb7ab72f4: anti directory traversal
 $ cargo run
 
  # in another terminal
-{ echo 'GET /Cargo.toml' ; cat } | telnet localhost 8080
+$ curl -0 http://localhost:8080/Cargo.toml
+ # to see response headers,
+$ curl -I0 http://localhost:8080/Cargo.toml
+ # to see full conversation
+$ curl -v0 http://localhost:8080/Cargo.toml
  # to check directory traversal
-$ { echo "GET ../some_file" ; cat } | telnet localhost 8080
+$ { echo "GET /../some_file HTTP/1.0\n" ; cat } | telnet localhost 8080
 ```
 
