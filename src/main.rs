@@ -1,119 +1,13 @@
 mod parser;
+mod data;
+mod handler;
+mod server;
 
-use std::net::TcpListener;
-use std::thread;
-use std::io::{Read, Write};
-use std::io;
-use std::fs::File;
-use std::path::PathBuf;
-
-fn server_start() -> io::Result<()> {
-    // 127.0.0.1:8080をlistenし、acceptしつづけるリスナーを作成
-    let lis = TcpListener::bind("127.0.0.1:8080")?;
-    // コネクションがある度にstreamを取り出せる
-    for stream in lis.incoming() {
-        // streamを包むResultを一旦剥がす
-        // エラーが出てもループを継続するために`?`は使わない
-        let mut stream = match stream {
-            Ok(stream) => stream,
-            Err(e) => {
-                // acceptでエラーが起きたらそれを通知して次のループへ
-                println!("An error occured while accepting a connection: {}", e);
-                continue;
-            }
-        };
-        // IO処理はブロックするので別スレッドを立てる
-        // そうすることでリクエストを処理しつつ新たなコネクションを受け付けられる
-        // スレッドはspawnしたあと見捨てるので返り値のスレッドハンドルは無視
-        let _ = thread::spawn(
-            // spawnの引数にはクロージャを渡す
-            // クロージャは `|引数| 本体` あるいは `|引数| -> 返り値の型 { 本体 }` で作る
-            // 関数と違って`()`でなくとも型を推論できるなら引数の型や`-> 返り値の型`を省略できる
-            // `move`はクロージャが捕捉した変数（今回は`stream`）の所有権をクロージャにムーブするためのキーワード
-            move || -> io::Result<()> {
-                use parser::ParseResult::*;
-                // リクエスト全体を格納するバッファ
-                let mut buf = Vec::new();
-                loop {
-                    // 1回のread分を格納する一時バッファ
-                    let mut b = [0; 1024];
-                    // 入力をバッファに読み込む
-                    // nには読み込んだバイト数が入る
-                    let n = stream.read(&mut b)?;
-                    if n == 0 {
-                        // 読み込んだバイト数が0ならストリームの終了。
-                        // スレッドから抜ける。
-                        return Ok(());
-                    }
-                    // リクエスト全体のバッファに今読み込んだ分を追記
-                    buf.extend_from_slice(&b[0..n]);
-                    // それ以外ではHTTP/1.0のリクエストの処理
-                    // レスポンスのフォーマットは以下を参照
-                    // https://tools.ietf.org/html/rfc1945#section-6
-                    // 課題はヘッダのパースのみなのでレスポンスは雑に返す。
-                    match parser::parse(buf.as_slice()) {
-                        // 入力の途中なら新たな入力を待つため次のイテレーションへ
-                        Partial => continue,
-                        // エラーなら不正な入力なのでBad Requestを返す
-                        // スレッドから抜けると`stream`のライフタイムが終わるため、コネクションが自動で閉じられる
-                        Error => write!(stream, "HTTP/1.0 400 Bad Request\r\n\r\n")?,
-                        // リクエストが届けば処理をする
-                        Complete(req) => {
-                            // 相対ディレクトリでアクセスするために
-                            // リクエストのパスの先頭の`/`を取り除く
-                            let mut path = req.path;
-                            while path.starts_with("/") {
-                                path = &path[1..];
-                            }
-
-                            // 絶対パスにする
-                            let path = PathBuf::new().join(path).canonicalize()?;
-                            // 正準な絶対パス同士の比較でベースディレクトリから始まらないパスに
-                            // アクセスしようとしていればディレクトリトラバーサルなので
-                            // Bad Requestとする
-                            let base_dir = PathBuf::new().join("./").canonicalize()?;
-                            if !path.starts_with(&base_dir) {
-                                write!(stream, "HTTP/1.0 400 Bad Request\r\n\r\n")?;
-                                return Ok(());
-                            }
-                            // ファイルを開く。HTTP/1.0はエラーがあるので
-                            // エラーハンドリングをする。
-                            match File::open(path) {
-                                Ok(mut file) => {
-                                    write!(stream, "HTTP/1.0 200 Ok\r\n\r\n")?;
-                                    // io::copyでinputからoutputへコピーできる
-                                    io::copy(&mut file, &mut stream)?;
-                                }
-                                Err(ioerror) => {
-                                    use io::ErrorKind::*;
-                                    match ioerror.kind() {
-                                        // ファイルがなければNot Found
-                                        NotFound => {
-                                            write!(stream, "HTTP/1.0 404 Not Found\r\n\r\n")?
-                                        }
-                                        // それ以外はInternal Server Error
-                                        _ => {
-                                            write!(
-                                                stream,
-                                                "HTTP/1.0 500 Internal Server Error\r\n\r\n"
-                                            )?
-                                        }
-                                    }
-                                }
-                            }
-                            // 処理が完了したらスレッドから抜ける
-                            return Ok(());
-                        }
-                    };
-                }
-            },
-        );
-    }
-    Ok(())
-}
+use server::Server;
 
 fn main() {
-    match server_start() {
+    let server = Server::new();
+    match server.start("127.0.0.1:8080") {
         Ok(_) => (),
         Err(e) => println!("{:?}", e),
     }

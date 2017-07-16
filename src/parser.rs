@@ -1,5 +1,6 @@
 use std::str::from_utf8;
-use std::collections::HashMap;
+
+use data::{Request, Method, Version};
 
 // パーサの結果は成功/失敗の他に「入力が途中で終わってしまった」もあり、`Result`が使えないので自前定義
 // モジュールを使うと可視性が必要になるが、`pub`がつくと上位のモジュールから見えるようになる
@@ -11,6 +12,11 @@ pub enum ParseResult<T> {
     Error,
 }
 
+// cfgを使うことでアイテムを条件コンパイルすることができる
+// 今回はこれらのメソッドはテスト時にしか使っていないので
+// テストの時のみコンパイルするようにする。
+// 因みに`impl`ブロックは複数個書けるの
+#[cfg(test)]
 // ジェネリクス型の`impl`を書くにはこのようにする
 impl<T> ParseResult<T> {
     // `pub`がついていないためこの関数は上位のモジュールから見えない
@@ -91,69 +97,6 @@ macro_rules! ptry {
 // それぞれのパースはただの作業なので今回は行なわない
 
 
-// データ型には`#[derive()]`アノテーションでいくつかのトレイトを自動で実装できる
-// Copy以外は出来る限り実装した方がいいとされる。
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-// `'`から始まるものはライフタイムパラメータ。ライフタイムも型のようにプログラム上で扱える
-// RFC1945ではGET, HEAD, POST, extention-methodが定義されている。
-pub enum Method<'a> {
-    Get,
-    Head,
-    Post,
-    Ext(&'a str),
-}
-
-// `Request`を`Default`にするためにここで`Default`を実装しておく
-impl<'a> Default for Method<'a> {
-    fn default() -> Self {
-        Method::Get
-    }
-}
-
-// パース結果を表わす構造体
-// 構造体のフィールドには1つ1つ`pub`が必要
-#[derive(Debug, Clone, Eq, PartialEq, Default)]
-pub struct Request<'a> {
-    pub path: &'a str,
-    pub method: Method<'a>,
-    // ヘッダは本来はcase insensitiveなのだが処理がややこしくなるので
-    // 今回はcase sensitiveに扱うことにする。
-    // 多くのクライアントはCamel-Kabab-Caseで送ってくるのであまり困らない。
-    // case insensitiveに扱いたければ[unicase][^1]など使うとよい
-    // [^1]: https://crates.io/crates/unicase
-    pub headers: HashMap<&'a str, Option<&'a [u8]>>,
-    pub body: Option<&'a [u8]>,
-}
-
-impl<'a> Request<'a> {
-    fn new(method: Method<'a>, path: &'a str) -> Self {
-        // Requestのimplの中では`Self`で`Request`を初期化できる
-        Self {
-            // フィールド名と初期化する値として渡す変数名が同じなら
-            // `フィールド名: 値,`
-            // を省略して
-            // `フィールド名,`
-            // だけで初期化できる
-            path,
-            method,
-            // `..値`構文で指定したフィールド以外のフィールドを与えた値のフィールド値で埋める。
-            // 今回は`Default`トレイトを使ってデフォルト値で埋める。
-            ..Self::default()
-        }
-        // 上の初期化は以下のコードと同じ
-        // ```rust
-        // let mut tmp = Self::default();
-        // Self {
-        //     path: path,
-        //     method: method,
-        //     headers: tmp.headers,
-        //     body: tmp.body,
-        // }
-        // ```
-
-    }
-}
-
 // Request = Simple-Request | Full-Request
 pub fn parse(buf: &[u8]) -> ParseResult<Request> {
     use self::ParseResult::*;
@@ -191,7 +134,11 @@ fn parse_09(mut buf: &[u8]) -> ParseResult<Request> {
     from_utf8(buf)
         // タプル構造体は関数としても扱える
         // Result<&str, Utf8Error> -> Result<Request, Utf8Error>
-        .map(|path| Request::new(Method::Get, path))
+        .map(|path| {
+            let mut req = Request::new(Method::Get, path);
+            req.version = Version::HTTP09;
+            req
+        })
         // `From`を実装したので自動で実装された`Into`の`into`メソッドを呼んでいる
         //  Result<Request, Utf8Error> -> ParseResult<Request>
         .into()
@@ -446,4 +393,5 @@ fn http10_curl_request() {
     };
     assert_eq!(res.method, Method::Get);
     assert_eq!(res.path, "/Calgo.toml");
+    assert_eq!(res.version, Version::HTTP10);
 }
